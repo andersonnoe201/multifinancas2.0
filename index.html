@@ -298,9 +298,8 @@ const CATS={
 };
 const getCat=(type,name)=>CATS[type]?.find(c=>c.name===name)||CATS[type]?.[0]||{icon:"box",color:"#7a88b0"};
 
-/* ── STORAGE (cache local apenas — fonte de verdade é o Firebase) ── */
+/* ── STORAGE (apenas cache local — fonte de verdade é o Firebase) ── */
 const Store={
-  // Cache de usuários (para exibição rápida enquanto carrega do Firebase)
   getUsers:()=>{try{return JSON.parse(localStorage.getItem("ff_users_cache")||"{}");}catch{return{};}},
   saveUsers:d=>localStorage.setItem("ff_users_cache",JSON.stringify(d)),
   getCurUser:()=>localStorage.getItem("ff_cur_user")||null,
@@ -334,9 +333,8 @@ const FB={
   /* ── Usuários no Firestore — compartilhado entre todos os dispositivos ── */
   usersCol:()=>_db?_db.collection("users_auth"):null,
 
-  // Busca todos os usuários do Firebase e atualiza cache local
   getUsers:async()=>{
-    if(!_db) return Store.getUsers();
+    if(!_db)return Store.getUsers();
     try{
       const snap=await FB.usersCol().get();
       const obj={};
@@ -346,31 +344,26 @@ const FB={
     }catch(e){console.error("Erro getUsers:",e);return Store.getUsers();}
   },
 
-  // Busca um único usuário pelo username
   getUser:async(username)=>{
-    if(!_db) return Store.getUsers()[username]||null;
+    if(!_db)return Store.getUsers()[username]||null;
     try{
       const doc=await FB.usersCol().doc(username).get();
-      if(!doc.exists) return null;
+      if(!doc.exists)return null;
       const u={...doc.data(),username:doc.id};
-      // atualiza cache
-      const cached=Store.getUsers();
-      Store.saveUsers({...cached,[username]:u});
+      Store.saveUsers({...Store.getUsers(),[username]:u});
       return u;
     }catch(e){return Store.getUsers()[username]||null;}
   },
 
-  // Cria ou atualiza um usuário no Firebase
   saveUser:async(u)=>{
     const {username,...data}=u;
-    if(!_db){const c=Store.getUsers();Store.saveUsers({...c,[username]:u});return;}
+    if(!_db){Store.saveUsers({...Store.getUsers(),[username]:u});return;}
     try{
       await FB.usersCol().doc(username).set({...data,username});
-      const c=Store.getUsers();Store.saveUsers({...c,[username]:u});
+      Store.saveUsers({...Store.getUsers(),[username]:u});
     }catch(e){console.error("Erro saveUser:",e);}
   },
 
-  // Atualiza campos específicos de um usuário
   updateUser:async(username,fields)=>{
     if(!_db)return;
     try{
@@ -380,7 +373,6 @@ const FB={
     }catch(e){console.error("Erro updateUser:",e);}
   },
 
-  // Deleta um usuário do Firebase
   deleteUserDoc:async(username)=>{
     if(!_db)return;
     try{
@@ -392,12 +384,11 @@ const FB={
   /* ── Admin no Firestore ── */
   adminDoc:()=>_db?_db.collection("admin").doc("config"):null,
 
-  // Busca config do admin. Se não existir, cria com senha padrão "1234"
   getAdminConfig:async()=>{
     if(!_db)return{password:"1234",logs:[]};
     try{
       const doc=await FB.adminDoc().get();
-      if(doc.exists) return doc.data();
+      if(doc.exists)return doc.data();
       const def={password:"1234",logs:[],createdAt:new Date().toISOString()};
       await FB.adminDoc().set(def);
       return def;
@@ -413,19 +404,17 @@ const FB={
     if(!_db)return false;
     try{
       const doc=await FB.adminDoc().get();
-      if(doc.exists) await FB.adminDoc().update({password:newPass});
+      if(doc.exists)await FB.adminDoc().update({password:newPass});
       else await FB.adminDoc().set({password:newPass,logs:[],createdAt:new Date().toISOString()});
       return true;
     }catch(e){console.error(e);return false;}
   },
 
-  // Reseta a senha do admin para o valor padrão forçando sobrescrita
+  // Força sobrescrita da senha (usado para reset)
   resetAdminPass:async(newPass="1234")=>{
     if(!_db)return false;
-    try{
-      await FB.adminDoc().set({password:newPass,logs:[],updatedAt:new Date().toISOString()},{merge:true});
-      return true;
-    }catch(e){console.error(e);return false;}
+    try{await FB.adminDoc().set({password:newPass,logs:[],updatedAt:new Date().toISOString()},{merge:true});return true;}
+    catch(e){console.error(e);return false;}
   },
 
   addLog:async(action,by,detail="")=>{
@@ -513,7 +502,7 @@ function AdminLogin({onEnter}){
 /* ── ADMIN PANEL ── */
 function AdminPanel({onExit}){
   const [tab,setTab]=useState("overview");
-  const [users,setUsers]=useState(Store.getUsers()); // inicia com cache
+  const [users,setUsers]=useState(Store.getUsers()); // inicia com cache local
   const [usersLoading,setUsersLoading]=useState(true);
   const [logs,setLogs]=useState(Store.getLogs());
   const [logsLoading,setLogsLoading]=useState(true);
@@ -526,14 +515,13 @@ function AdminPanel({onExit}){
   const [newUser,setNewUser]=useState({username:"",name:"",password:""});
   const [savingAdminPass,setSavingAdminPass]=useState(false);
 
-  // Carrega usuários e logs do Firebase ao abrir o painel
+  // Carrega usuários e logs do Firebase ao abrir
   useEffect(()=>{
     FB.getUsers().then(u=>{setUsers(u);setUsersLoading(false);}).catch(()=>setUsersLoading(false));
     FB.getLogs().then(l=>{setLogs(l);setLogsLoading(false);}).catch(()=>setLogsLoading(false));
   },[]);
 
   const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3000);};
-
   const refresh=async()=>{
     setUsersLoading(true);setLogsLoading(true);
     const [u,l]=await Promise.all([FB.getUsers(),FB.getLogs()]);
@@ -544,10 +532,7 @@ function AdminPanel({onExit}){
   const uList=Object.values(users);
   const now=new Date();
   const totalUsers=uList.length;
-  const activeToday=uList.filter(u=>{
-    const cache=Store.getCache(u.username);
-    return cache.some(t=>new Date(t.createdAt||t.date).toDateString()===now.toDateString());
-  }).length;
+  const activeToday=uList.filter(u=>{const c=Store.getCache(u.username);return c.some(t=>new Date(t.createdAt||t.date).toDateString()===now.toDateString());}).length;
   const totalTx=uList.reduce((s,u)=>s+Store.getCache(u.username).length,0);
   const bannedCount=uList.filter(u=>u.banned).length;
 
@@ -557,14 +542,14 @@ function AdminPanel({onExit}){
   const banUser=async(username)=>{
     await FB.updateUser(username,{banned:true});
     await FB.addLog("Usuário banido","admin",username);
-    const updated={...users,[username]:{...users[username],banned:true}};
-    setUsers(updated);notify("Usuário banido.");
+    setUsers(u=>({...u,[username]:{...u[username],banned:true}}));
+    notify("Usuário banido.");
   };
   const unbanUser=async(username)=>{
     await FB.updateUser(username,{banned:false});
     await FB.addLog("Ban removido","admin",username);
-    const updated={...users,[username]:{...users[username],banned:false}};
-    setUsers(updated);notify("Ban removido!","info");
+    setUsers(u=>({...u,[username]:{...u[username],banned:false}}));
+    notify("Ban removido!","info");
   };
   const deleteUser=async(username)=>{
     await FB.deleteUserDoc(username);
@@ -572,15 +557,15 @@ function AdminPanel({onExit}){
     localStorage.removeItem("ff_forecast_"+username);
     localStorage.removeItem("ff_tx_"+username);
     await FB.addLog("Usuário excluído","admin",username);
-    const updated={...users};delete updated[username];
-    setUsers(updated);setConfirmDel(null);notify("Usuário excluído.");
+    setUsers(u=>{const n={...u};delete n[username];return n;});
+    setConfirmDel(null);notify("Usuário excluído.");
   };
   const resetPassword=async(username)=>{
     if(!newPass||newPass.length<4){notify("Senha mínima de 4 caracteres.","error");return;}
     await FB.updateUser(username,{password:newPass});
     await FB.addLog("Senha redefinida","admin",username);
-    const updated={...users,[username]:{...users[username],password:newPass}};
-    setUsers(updated);setEditUser(null);setNewPass("");notify("Senha alterada!");
+    setUsers(u=>({...u,[username]:{...u[username],password:newPass}}));
+    setEditUser(null);setNewPass("");notify("Senha alterada!");
   };
   const changeAdminPass=async()=>{
     if(!adminPass||adminPass.length<4){notify("Senha mínima de 4 caracteres.","error");return;}
@@ -597,7 +582,7 @@ function AdminPanel({onExit}){
     const u={username:newUser.username,name:newUser.name,password:newUser.password,color:avatarColor(newUser.name),createdAt:new Date().toISOString()};
     await FB.saveUser(u);
     await FB.addLog("Usuário criado pelo admin","admin",newUser.username);
-    setUsers({...users,[newUser.username]:u});
+    setUsers(prev=>({...prev,[newUser.username]:u}));
     setShowNewUser(false);setNewUser({username:"",name:"",password:""});notify("Usuário criado!");
   };
   const clearLogs=async()=>{
@@ -704,10 +689,10 @@ function AdminPanel({onExit}){
                 <button className="btn btn-outline" onClick={()=>setTab("users")} style={{padding:"7px 14px",fontSize:12}}>Ver todos</button>
               </div>
               {usersLoading
-                ?<div style={{textAlign:"center",padding:"28px 0",color:"var(--muted)"}}><span className="spin-anim" style={{width:24,height:24,border:"2.5px solid var(--border2)",borderTopColor:"var(--violet)",borderRadius:"50%",display:"inline-block"}}/><p style={{marginTop:10,fontSize:13}}>Carregando do Firebase...</p></div>
+                ?<div style={{textAlign:"center",padding:"28px 0",color:"var(--muted)"}}><span className="spin-anim" style={{width:22,height:22,border:"2.5px solid var(--border2)",borderTopColor:"var(--violet)",borderRadius:"50%",display:"inline-block"}}/><p style={{marginTop:10,fontSize:12}}>Carregando...</p></div>
                 :uList.length===0
-                  ?<div style={{textAlign:"center",padding:"28px 0",color:"var(--muted)"}}><IC n="users" s={32} c="var(--border2)"/><p style={{marginTop:10,fontSize:13}}>Nenhum usuário</p></div>
-                  :uList.slice(0,5).map(u=>{
+                ?<div style={{textAlign:"center",padding:"28px 0",color:"var(--muted)"}}><IC n="users" s={32} c="var(--border2)"/><p style={{marginTop:10,fontSize:13}}>Nenhum usuário</p></div>
+                :uList.slice(0,5).map(u=>{
                   const txCount=Store.getCache(u.username).length;
                   return(<div key={u.username} style={{display:"flex",alignItems:"center",gap:12,padding:"10px",borderRadius:12,marginBottom:4,background:"transparent",transition:"background .15s"}} onMouseEnter={e=>e.currentTarget.style.background="var(--surface2)"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
                     <div style={{width:36,height:36,borderRadius:"50%",background:u.color||avatarColor(u.name),display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:"#fff",flexShrink:0,opacity:u.banned?.5:1}}>{initials(u.name)}</div>
@@ -904,7 +889,7 @@ function AdminPanel({onExit}){
                 {l:"Transações totais (cache)",v:totalTx+" registros"},
                 {l:"Logs armazenados",v:logs.length+" eventos (máx. 200)"},
                 {l:"Armazenamento admin",v:"Firebase Firestore"},
-                {l:"Armazenamento usuários",v:"localStorage (por dispositivo)"},
+                {l:"Armazenamento usuários",v:"Firebase Firestore"},
                 {l:"Versão do sistema",v:"Multifinanças v2.0 Admin"},
               ].map(r=>(
                 <div key={r.l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid var(--border)"}}>
@@ -992,23 +977,26 @@ function LoginScreen({onLogin,onAdminClick}){
     if(!form.username.trim()||!form.password.trim()){setErr("Preencha todos os campos.");return;}
     if(form.password.length<4){setErr("Senha mínima de 4 caracteres.");return;}
     setLoading(true);
-    if(mode==="register"){
-      if(!form.name.trim()){setErr("Digite seu nome.");setLoading(false);return;}
-      // Verifica no Firebase se username já existe
-      const existing=await FB.getUser(form.username.trim().toLowerCase());
-      if(existing){setErr("Usuário já existe.");setLoading(false);return;}
-      const newUser={username:form.username.trim().toLowerCase(),password:form.password,name:form.name.trim(),color:avatarColor(form.name),createdAt:new Date().toISOString()};
-      await FB.saveUser(newUser);
-      FB.addLog("Novo cadastro",newUser.username).catch(()=>{});
-      onLogin(newUser);
-    }else{
-      // Busca usuário no Firebase
-      const u=await FB.getUser(form.username.trim().toLowerCase());
-      if(!u||u.password!==form.password){setErr("Usuário ou senha incorretos.");setLoading(false);return;}
-      if(u.banned){setErr("Sua conta foi suspensa. Contate o administrador.");setLoading(false);return;}
-      FB.addLog("Login usuário",u.username).catch(()=>{});
-      onLogin(u);
-    }
+    const uname=form.username.trim().toLowerCase();
+    try{
+      if(mode==="register"){
+        if(!form.name.trim()){setErr("Digite seu nome.");setLoading(false);return;}
+        // Verifica no Firebase se já existe
+        const existing=await FB.getUser(uname);
+        if(existing){setErr("Usuário já existe.");setLoading(false);return;}
+        const newUser={username:uname,password:form.password,name:form.name.trim(),color:avatarColor(form.name),createdAt:new Date().toISOString()};
+        await FB.saveUser(newUser);
+        FB.addLog("Novo cadastro",uname).catch(()=>{});
+        onLogin(newUser);
+      }else{
+        // Busca no Firebase — funciona em qualquer dispositivo
+        const u=await FB.getUser(uname);
+        if(!u||u.password!==form.password){setErr("Usuário ou senha incorretos.");setLoading(false);return;}
+        if(u.banned){setErr("Sua conta foi suspensa. Contate o administrador.");setLoading(false);return;}
+        FB.addLog("Login usuário",u.username).catch(()=>{});
+        onLogin(u);
+      }
+    }catch(e){setErr("Erro de conexão. Verifique sua internet.");}
     setLoading(false);
   };
 
@@ -1030,10 +1018,10 @@ function LoginScreen({onLogin,onAdminClick}){
           <p style={{color:"var(--muted)",fontSize:14,marginTop:6}}>{mode==="login"?"Bem-vindo de volta":"Crie sua conta gratuita"}</p>
         </div>
 
-        {/* User previews (login only — usa cache local para exibição rápida) */}
-        {mode==="login"&&(()=>{const uList=Object.values(Store.getUsers());if(!uList.length)return null;
+        {/* User previews (login only) */}
+        {mode==="login"&&(()=>{const users=Store.getUsers();const uList=Object.values(users);if(!uList.length)return null;
           return(<div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:16,padding:16,marginBottom:20}}>
-            <p style={{fontSize:11,color:"var(--muted2)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px",marginBottom:12}}>Contas salvas neste dispositivo</p>
+            <p style={{fontSize:11,color:"var(--muted2)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px",marginBottom:12}}>Contas salvas</p>
             <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
               {uList.map(u=>(
                 <div key={u.username} onClick={()=>setForm(f=>({...f,username:u.username}))} title={u.name}
@@ -1116,11 +1104,10 @@ function App(){
   const now=new Date();
   const unsubRef=useRef(null);
 
-  // Inicia Firebase uma única vez com o config fixo embutido no HTML
-  // Nunca restaura sessão automaticamente — usuário sempre faz login ao abrir
+  // Inicia Firebase. Na primeira vez, redefine senha admin para "1234"
   useEffect(()=>{
     FB.init(window.FF_CONFIG);
-    // Redefine senha admin para "1234" uma única vez (remove este bloco após trocar a senha)
+    // Reseta senha admin para "1234" uma única vez por dispositivo
     if(!localStorage.getItem("ff_adm_reset_v1")){
       FB.resetAdminPass("1234").then(()=>{
         localStorage.setItem("ff_adm_reset_v1","done");
