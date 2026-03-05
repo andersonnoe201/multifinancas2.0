@@ -15,7 +15,7 @@
    Cole aqui as credenciais do seu projeto Firebase.
    Os usuários nunca verão esta tela. */
 window.FF_CONFIG = {
-  apiKey:            "AIzaSyApA9PXnin2gik6CAhqDor0lHxSz6SWS64"",
+  apiKey:            "AIzaSyApA9PXnin2gik6CAhqDor0lHxSz6SWS64",
   authDomain:        "minhas-financas-a046d.firebaseapp.com",
   projectId:         "minhas-financas-a046d",
   storageBucket:     "minhas-financas-a046d.firebasestorage.app",
@@ -313,16 +313,9 @@ const Store={
   getCacheKey:u=>"ff_tx_"+u,
   getCache:(u)=>{try{return JSON.parse(localStorage.getItem("ff_tx_"+u)||"[]");}catch{return[];}},
   saveCache:(u,d)=>localStorage.setItem("ff_tx_"+u,JSON.stringify(d)),
-  // Admin
-  getAdminUser:()=>localStorage.getItem("ff_admin_user")||"admin",
-  getAdminPass:()=>localStorage.getItem("ff_admin_pass")||"admin123",
-  setAdminPass:(p)=>localStorage.setItem("ff_admin_pass",p),
+  // Admin — apenas logs locais (cache rápido); senha e usuários ficam no Firebase
   getLogs:()=>{try{return JSON.parse(localStorage.getItem("ff_logs")||"[]");}catch{return[];}},
-  addLog:(action,by,detail="")=>{
-    const logs=Store.getLogs();
-    logs.unshift({id:Date.now(),ts:new Date().toISOString(),action,by,detail});
-    localStorage.setItem("ff_logs",JSON.stringify(logs.slice(0,200)));
-  },
+  cacheLogs:(logs)=>localStorage.setItem("ff_logs",JSON.stringify(logs.slice(0,200))),
 };
 
 /* ── FIREBASE ── */
@@ -337,7 +330,73 @@ const FB={
   col:(uid)=>_db?_db.collection("users").doc(uid).collection("transactions"):null,
   add:async(uid,tx)=>{if(!_db)return false;await FB.col(uid).doc(tx.id).set(tx);return true;},
   del:async(uid,id)=>{if(!_db)return false;await FB.col(uid).doc(id).delete();return true;},
-  listen:(uid,cb)=>{if(!_db)return()=>{};return FB.col(uid).orderBy("date","desc").onSnapshot(snap=>{cb(snap.docs.map(d=>d.data()));},err=>console.error(err));}
+  listen:(uid,cb)=>{if(!_db)return()=>{};return FB.col(uid).orderBy("date","desc").onSnapshot(snap=>{cb(snap.docs.map(d=>d.data()));},err=>console.error(err));},
+
+  /* ── Admin no Firestore ── */
+  adminDoc:()=>_db?_db.collection("admin").doc("config"):null,
+
+  // Busca config do admin (senha). Se não existir, cria com senha padrão "admin123"
+  getAdminConfig:async()=>{
+    if(!_db)return{password:"admin123",logs:[]};
+    try{
+      const doc=await FB.adminDoc().get();
+      if(doc.exists) return doc.data();
+      // Primeira vez: inicializa no Firebase
+      const def={password:"admin123",logs:[],createdAt:new Date().toISOString()};
+      await FB.adminDoc().set(def);
+      return def;
+    }catch(e){console.error("Erro ao buscar config admin:",e);return{password:"admin123",logs:[]};}
+  },
+
+  // Verifica senha do admin direto no Firebase
+  checkAdminPass:async(pass)=>{
+    const cfg=await FB.getAdminConfig();
+    return cfg.password===pass;
+  },
+
+  // Atualiza senha do admin no Firebase
+  setAdminPass:async(newPass)=>{
+    if(!_db)return false;
+    try{await FB.adminDoc().update({password:newPass});return true;}
+    catch(e){console.error(e);return false;}
+  },
+
+  // Adiciona log no Firebase (e cache local)
+  addLog:async(action,by,detail="")=>{
+    const entry={id:Date.now(),ts:new Date().toISOString(),action,by,detail};
+    // Cache local imediato
+    const local=Store.getLogs();
+    local.unshift(entry);
+    Store.cacheLogs(local);
+    // Persiste no Firebase
+    if(!_db)return;
+    try{
+      const cfg=await FB.getAdminConfig();
+      const logs=cfg.logs||[];
+      logs.unshift(entry);
+      await FB.adminDoc().update({logs:logs.slice(0,200)});
+    }catch(e){console.error("Erro ao salvar log:",e);}
+  },
+
+  // Busca logs do Firebase (fonte de verdade)
+  getLogs:async()=>{
+    if(!_db)return Store.getLogs();
+    try{
+      const cfg=await FB.getAdminConfig();
+      const logs=cfg.logs||[];
+      Store.cacheLogs(logs); // atualiza cache
+      return logs;
+    }catch(e){return Store.getLogs();}
+  },
+
+  // Limpa logs no Firebase
+  clearLogs:async()=>{
+    if(!_db)return;
+    try{
+      await FB.adminDoc().update({logs:[]});
+      Store.cacheLogs([]);
+    }catch(e){console.error(e);}
+  },
 };
 
 /* ── ADMIN LOGIN ── */
@@ -345,9 +404,16 @@ function AdminLogin({onEnter}){
   const [pass,setPass]=useState("");
   const [err,setErr]=useState("");
   const [showPw,setShowPw]=useState(false);
-  const tryLogin=()=>{
-    if(pass===Store.getAdminPass()){Store.addLog("Login admin","admin");onEnter();}
-    else{setErr("Senha incorreta.");setTimeout(()=>setErr(""),2500);}
+  const [loading,setLoading]=useState(false);
+  const tryLogin=async()=>{
+    if(!pass){setErr("Digite a senha.");return;}
+    setLoading(true);setErr("");
+    try{
+      const ok=await FB.checkAdminPass(pass);
+      if(ok){await FB.addLog("Login admin","admin");onEnter();}
+      else{setErr("Senha incorreta.");setTimeout(()=>setErr(""),2500);}
+    }catch(e){setErr("Erro ao conectar ao Firebase.");}
+    setLoading(false);
   };
   return(
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20,background:"var(--bg)"}}>
@@ -366,7 +432,7 @@ function AdminLogin({onEnter}){
             <div style={{position:"relative"}}>
               <div style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)"}}><IC n="lock" s={15} c="var(--muted2)"/></div>
               <input type={showPw?"text":"password"} className="inp" placeholder="••••••••" value={pass}
-                onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&tryLogin()}
+                onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!loading&&tryLogin()}
                 style={{paddingLeft:42,paddingRight:42,borderColor:err?"rgba(255,79,128,.4)":"var(--border)"}}/>
               <button onClick={()=>setShowPw(v=>!v)} style={{position:"absolute",right:14,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer"}}>
                 <IC n={showPw?"eyeoff":"eye"} s={15} c="var(--muted2)"/>
@@ -376,8 +442,11 @@ function AdminLogin({onEnter}){
           {err&&<div style={{background:"var(--rose-dim)",border:"1px solid rgba(255,79,128,.2)",borderRadius:10,padding:"9px 14px",color:"var(--rose)",fontSize:13,marginBottom:14,display:"flex",alignItems:"center",gap:8}}>
             <IC n="alert" s={13} c="var(--rose)"/>{err}
           </div>}
-          <button className="btn" onClick={tryLogin} style={{width:"100%",padding:"14px",fontSize:15,borderRadius:13,background:"linear-gradient(135deg,#ffb84d,#f59e0b)",color:"#000",fontWeight:700,boxShadow:"0 4px 24px rgba(255,184,77,.3)"}}>
-            <IC n="shield" s={16} c="#000"/>Entrar no Painel Admin
+          <button className="btn" onClick={tryLogin} disabled={loading} style={{width:"100%",padding:"14px",fontSize:15,borderRadius:13,background:"linear-gradient(135deg,#ffb84d,#f59e0b)",color:"#000",fontWeight:700,boxShadow:"0 4px 24px rgba(255,184,77,.3)"}}>
+            {loading
+              ?<span className="spin-anim" style={{width:18,height:18,border:"2.5px solid rgba(0,0,0,.2)",borderTopColor:"#000",borderRadius:"50%",display:"inline-block"}}/>
+              :<><IC n="shield" s={16} c="#000"/>Entrar no Painel Admin</>
+            }
           </button>
           <p style={{textAlign:"center",marginTop:14,fontSize:12,color:"var(--muted2)"}}>Senha padrão: <strong style={{color:"var(--muted)"}}>admin123</strong></p>
         </div>
@@ -390,7 +459,8 @@ function AdminLogin({onEnter}){
 function AdminPanel({onExit}){
   const [tab,setTab]=useState("overview");
   const [users,setUsers]=useState(Store.getUsers());
-  const [logs,setLogs]=useState(Store.getLogs());
+  const [logs,setLogs]=useState(Store.getLogs()); // cache local enquanto carrega
+  const [logsLoading,setLogsLoading]=useState(true);
   const [editUser,setEditUser]=useState(null);
   const [newPass,setNewPass]=useState("");
   const [adminPass,setAdminPass]=useState("");
@@ -398,9 +468,19 @@ function AdminPanel({onExit}){
   const [confirmDel,setConfirmDel]=useState(null);
   const [showNewUser,setShowNewUser]=useState(false);
   const [newUser,setNewUser]=useState({username:"",name:"",password:""});
+  const [savingAdminPass,setSavingAdminPass]=useState(false);
+
+  // Carrega logs do Firebase ao montar
+  useEffect(()=>{
+    FB.getLogs().then(l=>{setLogs(l);setLogsLoading(false);}).catch(()=>setLogsLoading(false));
+  },[]);
 
   const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3000);};
-  const refresh=()=>{setUsers(Store.getUsers());setLogs(Store.getLogs());};
+  const refresh=()=>{
+    setLogsLoading(true);
+    FB.getLogs().then(l=>{setLogs(l);setLogsLoading(false);});
+    setUsers(Store.getUsers());
+  };
 
   const uList=Object.values(users);
   const now=new Date();
@@ -420,25 +500,29 @@ function AdminPanel({onExit}){
 
   const banUser=(username)=>{
     const updated={...users,[username]:{...users[username],banned:true}};
-    Store.saveUsers(updated);Store.addLog("Usuário banido","admin",username);setUsers(updated);notify("Usuário banido.");
+    Store.saveUsers(updated);FB.addLog("Usuário banido","admin",username);setUsers(updated);notify("Usuário banido.");
   };
   const unbanUser=(username)=>{
     const updated={...users,[username]:{...users[username],banned:false}};
-    Store.saveUsers(updated);Store.addLog("Ban removido","admin",username);setUsers(updated);notify("Ban removido!","info");
+    Store.saveUsers(updated);FB.addLog("Ban removido","admin",username);setUsers(updated);notify("Ban removido!","info");
   };
   const deleteUser=(username)=>{
     const updated={...users};delete updated[username];
     Store.saveUsers(updated);localStorage.removeItem("ff_config_"+username);localStorage.removeItem("ff_plan_"+username);localStorage.removeItem("ff_forecast_"+username);localStorage.removeItem("ff_tx_"+username);
-    Store.addLog("Usuário excluído","admin",username);setUsers(updated);setConfirmDel(null);notify("Usuário excluído.");
+    FB.addLog("Usuário excluído","admin",username);setUsers(updated);setConfirmDel(null);notify("Usuário excluído.");
   };
   const resetPassword=(username)=>{
     if(!newPass||newPass.length<4){notify("Senha mínima de 4 caracteres.","error");return;}
     const updated={...users,[username]:{...users[username],password:newPass}};
-    Store.saveUsers(updated);Store.addLog("Senha redefinida","admin",username);setUsers(updated);setEditUser(null);setNewPass("");notify("Senha alterada!");
+    Store.saveUsers(updated);FB.addLog("Senha redefinida","admin",username);setUsers(updated);setEditUser(null);setNewPass("");notify("Senha alterada!");
   };
-  const changeAdminPass=()=>{
+  const changeAdminPass=async()=>{
     if(!adminPass||adminPass.length<4){notify("Senha mínima de 4 caracteres.","error");return;}
-    Store.setAdminPass(adminPass);Store.addLog("Senha admin alterada","admin");setAdminPass("");notify("Senha admin atualizada!");
+    setSavingAdminPass(true);
+    const ok=await FB.setAdminPass(adminPass);
+    setSavingAdminPass(false);
+    if(ok){await FB.addLog("Senha admin alterada","admin");setAdminPass("");notify("Senha admin atualizada!");}
+    else notify("Erro ao salvar no Firebase.","error");
   };
   const createUser=()=>{
     if(!newUser.username||!newUser.name||!newUser.password){notify("Preencha todos os campos.","error");return;}
@@ -446,10 +530,12 @@ function AdminPanel({onExit}){
     if(newUser.password.length<4){notify("Senha mínima 4 caracteres.","error");return;}
     const u={username:newUser.username,name:newUser.name,password:newUser.password,color:avatarColor(newUser.name),createdAt:new Date().toISOString()};
     const updated={...users,[newUser.username]:u};
-    Store.saveUsers(updated);Store.addLog("Usuário criado pelo admin","admin",newUser.username);
+    Store.saveUsers(updated);FB.addLog("Usuário criado pelo admin","admin",newUser.username);
     setUsers(updated);setShowNewUser(false);setNewUser({username:"",name:"",password:""});notify("Usuário criado!");
   };
-  const clearLogs=()=>{localStorage.removeItem("ff_logs");setLogs([]);notify("Logs limpos.");};
+  const clearLogs=async()=>{
+    await FB.clearLogs();setLogs([]);notify("Logs limpos.");
+  };
 
   const adminNavItems=[
     {id:"overview",icon:"activity",label:"Visão Geral"},
@@ -571,7 +657,7 @@ function AdminPanel({onExit}){
             <div className="card" style={{padding:24}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
                 <h3 style={{fontSize:14,fontWeight:700}}>Logs Recentes</h3>
-                <button className="btn btn-ghost" onClick={()=>{refresh();}} style={{padding:"5px 10px",fontSize:11}}><IC n="refresh" s={12} c="var(--muted)"/></button>
+                <button className="btn btn-ghost" onClick={refresh} style={{padding:"5px 10px",fontSize:11}}><IC n="refresh" s={12} c="var(--muted)"/></button>
               </div>
               {logs.length===0
                 ?<div style={{textAlign:"center",padding:"28px 0",color:"var(--muted)"}}><IC n="activity" s={28} c="var(--border2)"/><p style={{marginTop:8,fontSize:13}}>Sem registros</p></div>
@@ -677,15 +763,17 @@ function AdminPanel({onExit}){
           <div style={{marginBottom:28,display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
             <div>
               <h2 style={{fontSize:26,fontWeight:800,letterSpacing:"-0.7px"}}>Logs de Acesso</h2>
-              <p style={{color:"var(--muted)",fontSize:14,marginTop:4}}>{logs.length} eventos registrados</p>
+              <p style={{color:"var(--muted)",fontSize:14,marginTop:4}}>{logs.length} eventos registrados — armazenados no Firebase</p>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <button className="btn btn-ghost" onClick={()=>setLogs(Store.getLogs())} style={{padding:"9px 16px",fontSize:13}}><IC n="refresh" s={14} c="var(--muted)"/>Atualizar</button>
+              <button className="btn btn-ghost" onClick={refresh} style={{padding:"9px 16px",fontSize:13}}><IC n="refresh" s={14} c="var(--muted)"/>Atualizar</button>
               <button className="btn btn-danger" onClick={clearLogs} style={{padding:"9px 16px",fontSize:13}}><IC n="trash" s={14} c="var(--rose)"/>Limpar Logs</button>
             </div>
           </div>
           <div className="card" style={{padding:0,overflow:"hidden"}}>
-            {logs.length===0
+            {logsLoading
+              ?<div style={{textAlign:"center",padding:"52px 0",color:"var(--muted)"}}><div className="spin-anim" style={{width:28,height:28,border:"3px solid var(--border2)",borderTopColor:"var(--amber)",borderRadius:"50%",display:"inline-block",marginBottom:12}}/><p style={{fontSize:13}}>Carregando do Firebase...</p></div>
+              :logs.length===0
               ?<div style={{textAlign:"center",padding:"52px 0",color:"var(--muted)"}}><IC n="activity" s={40} c="var(--border2)"/><p style={{marginTop:14,fontSize:14}}>Nenhum log registrado</p></div>
               :<div>
                 {/* Header */}
@@ -725,8 +813,11 @@ function AdminPanel({onExit}){
                 <label style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1px",display:"block",marginBottom:7}}>Nova senha admin</label>
                 <input type="text" className="inp" placeholder="mínimo 4 caracteres" value={adminPass} onChange={e=>setAdminPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&changeAdminPass()} style={{fontSize:14}}/>
               </div>
-              <button className="btn" onClick={changeAdminPass} style={{padding:"11px 22px",fontSize:13,background:"linear-gradient(135deg,#ffb84d,#f59e0b)",color:"#000",fontWeight:700,borderRadius:11,boxShadow:"0 4px 20px rgba(255,184,77,.2)"}}>
-                <IC n="check" s={14} c="#000"/>Salvar nova senha
+              <button className="btn" onClick={changeAdminPass} disabled={savingAdminPass} style={{padding:"11px 22px",fontSize:13,background:"linear-gradient(135deg,#ffb84d,#f59e0b)",color:"#000",fontWeight:700,borderRadius:11,boxShadow:"0 4px 20px rgba(255,184,77,.2)"}}>
+                {savingAdminPass
+                  ?<span className="spin-anim" style={{width:16,height:16,border:"2.5px solid rgba(0,0,0,.2)",borderTopColor:"#000",borderRadius:"50%",display:"inline-block"}}/>
+                  :<><IC n="check" s={14} c="#000"/>Salvar nova senha</>
+                }
               </button>
             </div>
 
@@ -738,7 +829,8 @@ function AdminPanel({onExit}){
                 {l:"Usuários banidos",v:bannedCount+" usuários"},
                 {l:"Transações totais (cache)",v:totalTx+" registros"},
                 {l:"Logs armazenados",v:logs.length+" eventos (máx. 200)"},
-                {l:"Armazenamento",v:"localStorage (por dispositivo)"},
+                {l:"Armazenamento admin",v:"Firebase Firestore"},
+                {l:"Armazenamento usuários",v:"localStorage (por dispositivo)"},
                 {l:"Versão do sistema",v:"Multifinanças v2.0 Admin"},
               ].map(r=>(
                 <div key={r.l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid var(--border)"}}>
@@ -753,7 +845,7 @@ function AdminPanel({onExit}){
               <IC n="warning" s={18} c="var(--amber)" style={{flexShrink:0,marginTop:2}}/>
               <div>
                 <p style={{fontSize:13,fontWeight:700,color:"var(--amber)",marginBottom:4}}>Atenção</p>
-                <p style={{fontSize:12,color:"var(--muted)",lineHeight:1.7}}>Os dados são armazenados no <strong>localStorage</strong> do navegador. Para acesso multi-dispositivo, cada usuário deve configurar seu próprio Firebase. O admin só vê dados do dispositivo local.</p>
+                <p style={{fontSize:12,color:"var(--muted)",lineHeight:1.7}}>A <strong>senha do admin e os logs</strong> ficam armazenados no Firebase (cloud), acessíveis de qualquer dispositivo. Os dados dos usuários (transações, planos) ficam no localStorage de cada dispositivo como cache local.</p>
               </div>
             </div>
           </div>
@@ -834,12 +926,13 @@ function LoginScreen({onLogin,onAdminClick}){
       const newUser={username:form.username,password:form.password,name:form.name,color:avatarColor(form.name),createdAt:new Date().toISOString()};
       users[form.username]=newUser;
       Store.saveUsers(users);
-      Store.addLog("Novo cadastro",form.username);
+      FB.addLog("Novo cadastro",form.username);
       onLogin(newUser);
     }else{
       const u=users[form.username];
       if(!u||u.password!==form.password){setErr("Usuário ou senha incorretos.");setLoading(false);return;}
       if(u.banned){setErr("Sua conta foi suspensa. Contate o administrador.");setLoading(false);return;}
+      FB.addLog("Login usuário",u.username).catch(()=>{});
       onLogin(u);
     }
     setLoading(false);
@@ -965,7 +1058,7 @@ function App(){
 
   const handleLogin=(u)=>{
     setUser(u);
-    Store.addLog("Login usuário","admin",u.username);
+    FB.addLog("Login usuário","admin",u.username);
     setPlan(Store.getPlan(u.username));
     setForecast(Store.getForecast(u.username));
     connectLive(u.username);
